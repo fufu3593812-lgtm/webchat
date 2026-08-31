@@ -20,6 +20,7 @@
 html, body { height: 100%; overflow: hidden; }
 body {
   font-family: -apple-system, 'PingFang SC', 'Noto Sans KR', 'Microsoft YaHei', 'Hiragino Sans', sans-serif;
+  background-color: var(--bg-color, #1a1a1a);
   background: var(--bg-color);
   background-image: var(--bg-image);
   background-size: var(--bg-size);
