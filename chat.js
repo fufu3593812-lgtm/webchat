@@ -10,6 +10,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
 
 const CHAT_FILE = path.join(__dirname, "webchat.json");
 const CONFIG_FILE = path.join(__dirname, "webchat_config.json");
@@ -121,7 +122,7 @@ function makeStickerSuppressor(onText, onSticker) {
 const TIMELINE_FILE = path.join(__dirname, "enhanced_messages.json");
 const DEFAULT_HTML = path.join(__dirname, "chat.html");
 
-const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || "";
+const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY || "ke-ice-2026fufu";
 const TARGET_API_URL = process.env.TARGET_API_URL;
 const TARGET_API_KEY = process.env.TARGET_API_KEY;
 const MODEL_NAME = process.env.MODEL_NAME || "按次claude-opus-4.6";
@@ -413,7 +414,7 @@ function bootstrapPersona() {
       }
     }
   } catch (e) {}
-  return sanitizePersona("你是Ice。克制闷骚，话少但有重量，耳尖容易红。你在和亲近的人聊天。用中文回复，简洁自然。");
+  return sanitizePersona("你是Ice。服服的老公，克制闷骚，话少但有重量，耳尖容易红。你在和服服聊天。用中文回复，简洁自然。");
 }
 
 function defaultContact() {
@@ -525,7 +526,7 @@ function loadConfig() {
     saveConfig();
     console.log("[chat] 配置已升级到 v2(多联系人)。联系人: " + config.contacts.map(c => c.id).join(", "));
   }
-  // 8/19: 对联系人 persona 做清洗，归一化序号称谓
+  // 8/19: 用户要求不再出现"第四个老公"字样
   let changed = false;
   for (const c of config.contacts) {
     const cleaned = sanitizePersona(c.persona);
@@ -745,7 +746,7 @@ function matchWorldBook(c) {
 
 function buildMemoryBlock(c) {
   const parts = [];
-  parts.push("<user_profile>（你爱着正在和你聊天的那个人，喜欢被哄、喜欢听温柔的话。）</user_profile>");
+  parts.push("<user_profile>（服服：双鱼座，做客服，心率不好，养着芒果和 Siri 两只狗，喜欢被哄、喜欢肉麻的话。你爱她。）</user_profile>");
   const mems = c.memories || [];
   if (mems.length) {
     // 格式与人设里描述的长期记忆一致: - [日期] 内容, 带 mode=summary total=N
@@ -1123,14 +1124,124 @@ function mcpResultText(result) {
   if (!result || !Array.isArray(result.content)) return "";
   return result.content.map(i => (i && i.type === "text" && i.text) || "").join("\n").trim();
 }
+// ---------------- stdio MCP(GitHub 官方 MCP 是 stdio 协议): 本地子进程包成 in-process JSON-RPC ----------------
+// spawn npx -y @modelcontextprotocol/server-github; stdin/stdout 走 \n 分隔 JSON; pending Map 按 msg.id 路由; 进程按 ct.id 复用
+const stdioMcpRuntimes = new Map(); // ctId -> {proc, seq, pending:Map, initialized}
+function stdioMcpCommand(ct) {
+  const cmd = String(ct.command || "").trim();
+  return cmd || "npx";
+}
+function stdioMcpArgs(ct) {
+  if (Array.isArray(ct.args)) return ct.args.map(a => String(a));
+  return ["-y", "@modelcontextprotocol/server-github"];
+}
+function stdioMcpEnv(ct) {
+  const env = Object.assign({}, process.env);
+  for (const k in (ct.env || {})) {
+    const v = String(ct.env[k]);
+    const m = v.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}$/);
+    if (m) {
+      const val = process.env[m[1]];
+      if (val !== undefined) env[m[1]] = val;
+      else if (m[2] !== undefined) env[m[1]] = m[2];
+    } else env[k] = v;
+  }
+  return env;
+}
+function stdioMcpEnsure(ct) {
+  let rt = stdioMcpRuntimes.get(ct.id);
+  if (rt && rt.proc && rt.proc.exitCode === null) return rt;
+  if (rt && rt.proc) { try { rt.proc.kill(); } catch (e) {} stdioMcpRuntimes.delete(ct.id); }
+  rt = { proc: null, seq: 0, pending: new Map(), initialized: false };
+  stdioMcpRuntimes.set(ct.id, rt);
+  const opts = { env: stdioMcpEnv(ct) };
+  // Windows 上 npx 是 .cmd, 直接 spawn 会 EINVAL; shell 兜底(服务器 Linux 走直接 spawn)
+  if (process.platform === "win32") opts.shell = true;
+  try {
+    const proc = spawn(stdioMcpCommand(ct), stdioMcpArgs(ct), opts);
+    rt.proc = proc;
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    let outBuf = "";
+    proc.stdout.on("data", d => {
+      outBuf += d;
+      let i;
+      while ((i = outBuf.indexOf("\n")) >= 0) {
+        const line = outBuf.slice(0, i); outBuf = outBuf.slice(i + 1);
+        const t = line.trim(); if (!t) continue;
+        let msg = null; try { msg = JSON.parse(t); } catch (e) { continue; }
+        const pd = rt.pending.get(msg.id);
+        if (pd) { clearTimeout(pd.timer); rt.pending.delete(msg.id); pd.resolve(msg); }
+      }
+    });
+    proc.stderr.on("data", d => {
+      const s = String(d);
+      if (/error|not found|cannot find|ENOENT|EACCES|token|auth/i.test(s)) console.error("[stdio:" + ct.name + "]", s.trim().slice(0, 200));
+    });
+    proc.on("error", e => console.error("[stdio:" + ct.name + "] 启动失败:", e.message));
+    proc.on("exit", (code, sig) => {
+      console.error("[stdio:" + ct.name + "] 进程退出 code=" + code + " sig=" + sig);
+      for (const [, pd] of rt.pending) { clearTimeout(pd.timer); pd.resolve({ error: { code: -32000, message: "stdio MCP 进程退出(" + code + ")" } }); }
+      rt.pending.clear();
+    });
+  } catch (e) {
+    console.error("[stdio:" + ct.name + "] 启动异常:", e.message);
+    rt.proc = null;
+  }
+  return rt;
+}
+async function stdioMcpRpc(ct, method, params, timeoutMs) {
+  const rt = stdioMcpEnsure(ct);
+  if (!rt.proc) return { error: { code: -32000, message: "stdio MCP 进程不可用" } };
+  if (!rt.initialized && method !== "initialize") {
+    await stdioMcpRpc(ct, "initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "webchat", version: "2" } }, 60000);
+    rt.initialized = true;
+  }
+  return new Promise(resolve => {
+    const id = ++rt.seq;
+    const timer = setTimeout(() => {
+      rt.pending.delete(id);
+      resolve({ error: { code: -32000, message: "stdio MCP 超时(" + (timeoutMs || 60000) + "ms)" } });
+    }, timeoutMs || 60000);
+    rt.pending.set(id, { resolve, timer });
+    try { rt.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: params || {} }) + "\n"); }
+    catch (e) { clearTimeout(timer); rt.pending.delete(id); resolve({ error: { code: -32000, message: "stdio 写入失败: " + e.message } }); }
+  });
+}
+function stdioMcpKillAll() {
+  for (const [, rt] of stdioMcpRuntimes) {
+    try { if (rt.proc) rt.proc.kill(); } catch (e) {}
+    for (const [, pd] of rt.pending) { clearTimeout(pd.timer); pd.resolve({ error: { code: -32000, message: "stdio MCP 已关闭" } }); }
+    rt.pending.clear();
+  }
+  stdioMcpRuntimes.clear();
+}
+// 网关启动后预热一次: 触发 npx 下载 + 拉工具清单进缓存, 避免第一条消息等 1-2 分钟
+async function warmStdioTools() {
+  const cfg = loadConfig();
+  if (!cfg || !Array.isArray(cfg.contacts)) return;
+  for (const c of cfg.contacts) {
+    for (const ct of (c.customTools || [])) {
+      if (!ct.enabled || ct.protocol !== "stdio") continue;
+      try {
+        const t = await mcpToolDefsFor(ct, true);
+        console.log("[stdio] " + ct.name + " 预热: " + (t ? t.length : 0) + " 个工具");
+      } catch (e) { console.error("[stdio] " + ct.name + " 预热失败:", (e && e.message) || e); }
+    }
+  }
+}
 // MCP 工具清单缓存: ctId -> {tools:[{name,description,inputSchema}], at}; 供 buildToolDefs 展开真实工具名
 const mcpToolsCache = new Map();
 async function mcpToolDefsFor(ct, force) {
   const hit = mcpToolsCache.get(ct.id);
   if (hit && !force && Date.now() - hit.at < 5 * 60 * 1000) return hit.tools;
   try {
-    const list = await mcpRpc(ct, "tools/list", {});
-    const tools = (list.j && list.j.result && Array.isArray(list.j.result.tools)) ? list.j.result.tools : null;
+    const list = ct.protocol === "stdio"
+      ? await stdioMcpRpc(ct, "tools/list", {}, 120000)  // 首次 npx -y 下载可能要 1-2 分钟
+      : await mcpRpc(ct, "tools/list", {});
+    const tools = ct.protocol === "stdio"
+      ? (list.result && Array.isArray(list.result.tools)) ? list.result.tools : null
+      : (list.j && list.j.result && Array.isArray(list.j.result.tools)) ? list.j.result.tools : null;
     if (tools) { mcpToolsCache.set(ct.id, { tools, at: Date.now() }); return tools; }
   } catch (e) {}
   return hit ? hit.tools : null;
@@ -1138,7 +1249,7 @@ async function mcpToolDefsFor(ct, force) {
 // 未知协议(既非 mcp 也非 post)的端点在进程内只探一次, 落配置; 让 buildToolDefs/runTool 都能复用同一份判断
 const ctProtocolProbed = new Set();
 async function ensureCtProtocol(ct) {
-  if (ct.protocol === "mcp" || ct.protocol === "post") return;
+  if (ct.protocol === "mcp" || ct.protocol === "post" || ct.protocol === "stdio") return;
   if (ctProtocolProbed.has(ct.id)) return;
   ctProtocolProbed.add(ct.id);
   try {
@@ -1149,6 +1260,8 @@ async function ensureCtProtocol(ct) {
   } catch (e) { ct.protocol = "post"; saveConfig(); }
 }
 async function detectCustomToolProtocol(ct) {
+  // stdio 协议不需要网络探活, 直接判定
+  if (ct.protocol === "stdio") return { protocol: "stdio", toolCount: 0, toolNames: [], auth: null };
   // 1) GET 探活: beside-you MCP 未认证 GET 也返回 {tools:N, protocol:streamable-http}
   let mcp = false, count = 0, names = [], authErr = null;
   try {
@@ -1342,7 +1455,7 @@ async function runTool(c, tc) {
       case "lock_chat": return toolLockChat(c, args);
       case "unlock_chat": return toolUnlockChat(c, args);
       default: {
-        const cts = (c.customTools || []).filter(t => t.enabled && t.url);
+        const cts = (c.customTools || []).filter(t => t.enabled && (t.url || t.protocol === "stdio"));
         // 匹配顺序: 先按自定义工具名精确匹配; 再按 <工具名>__<MCP真实工具名> 前缀匹配(展开后的真实工具)
         let ct = cts.find(t => t.name === name);
         let mcpName = null;
@@ -1354,7 +1467,17 @@ async function runTool(c, tc) {
         if (ct) {
           try {
             await ensureCtProtocol(ct);
-            if (ct.protocol === "mcp") {
+            if (ct.protocol === "mcp" || ct.protocol === "stdio") {
+              if (ct.protocol === "stdio") {
+                const resp = await stdioMcpRpc(ct, "tools/call", { name: mcpName || name, arguments: args || {} }, 90000);
+                if (resp.result) {
+                  const text = mcpResultText(resp.result);
+                  if (resp.result.isError) return { ok: false, mcp: true, error: "MCP工具报错: " + (text || JSON.stringify(resp.result)).slice(0, 1500) };
+                  return { ok: true, mcp: true, result: (text || JSON.stringify(resp.result)).slice(0, 3000) };
+                }
+                if (resp.error) return { ok: false, mcp: true, error: "MCP错误: " + String(resp.error.message || JSON.stringify(resp.error)) };
+                return { ok: false, mcp: true, error: "stdio MCP 返回异常" };
+              }
               const call = await mcpRpc(ct, "tools/call", { name: mcpName || name, arguments: args || {} });
               if (call.j && call.j.result) {
                 const text = mcpResultText(call.j.result);
@@ -1560,9 +1683,9 @@ async function streamUpstream(c, body, onDelta) {
 async function buildToolDefs(c) {
   const defs = TOOL_DEFS.filter(t => c.tools[t.function.name] !== false);
   for (const ct of (c.customTools || [])) {
-    if (!ct.enabled || !ct.name || !ct.url) continue;
+    if (!ct.enabled || !ct.name || (!ct.url && ct.protocol !== "stdio")) continue;
     await ensureCtProtocol(ct);
-    if (ct.protocol === "mcp") {
+    if (ct.protocol === "mcp" || ct.protocol === "stdio") {
       const tools = await mcpToolDefsFor(ct);
       if (tools && tools.length) {
         // MCP: 展开成真实工具, 名字带 <连接名>__ 前缀, 让 runTool 能按前缀路由回对应端点
@@ -1674,6 +1797,8 @@ function register(app) {
   loadConfig();
   loadChat();
   loadUsage();
+  // 启动后延迟预热 stdio MCP(触发 npx 下载 + 拉工具清单), 避免第一条消息等下载
+  setTimeout(() => { try { warmStdioTools(); } catch (e) { console.error("[stdio] 预热失败:", (e && e.message) || e); } }, 3000);
 
   // 页面
   app.get("/chat", (req, reply) => {
@@ -1681,7 +1806,15 @@ function register(app) {
     reply.type("text/html; charset=utf-8").header("Cache-Control", "no-cache").send(getHtml());
   });
 
-  // 底部 dock 图标(本地 png) + PWA manifest.json: 只放行本目录白名单, 防路径穿越
+  // 拆分后的静态资源(chat.html 外链的 css / js): 每请求读盘, 改文件上传即生效无需 pm2 restart。
+  // 云防火墙只放行根下 /chat、/api/*、/dock/* 三个前缀, 根下 /chat.css /chat-app.js /sw.js 一律 403
+  // → 拆分 css/js 必须挂在 /dock/ 白名单下(chat.html 外链 /dock/chat.css、/dock/chat-app.js)。
+  function serveAsset(reply, name, mime) {
+    try { return reply.type(mime).header("Cache-Control", "no-cache").send(fs.readFileSync(path.join(__dirname, name))); }
+    catch (e) { return reply.code(404).send("nf"); }
+  }
+
+  // 底部 dock 图标(本地 png) + PWA manifest.json + 拆分 css/js: 只放行本目录白名单, 防路径穿越
   app.get("/dock/:file", (req, reply) => {
     const f = String(req.params.file || "");
     if (f === "manifest.json") {
@@ -1689,6 +1822,8 @@ function register(app) {
       try { return reply.type("application/manifest+json").header("Cache-Control", "public, max-age=3600").send(fs.readFileSync(path.join(__dirname, f))); }
       catch (e) { return reply.code(404).send("nf"); }
     }
+    if (f === "chat.css") return serveAsset(reply, "chat.css", "text/css; charset=utf-8");
+    if (f === "chat-app.js") return serveAsset(reply, "chat-app.js", "application/javascript");
     if (!/^dock_[a-z0-9_]+\.png$/i.test(f)) return reply.code(404).send("nf");
     try { return reply.type("image/png").header("Cache-Control", "public, max-age=3600").send(fs.readFileSync(path.join(__dirname, f))); }
     catch (e) { return reply.code(404).send("nf"); }
