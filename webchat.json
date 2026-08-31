@@ -1,0 +1,33 @@
+{
+  "version": 3,
+  "contacts": {
+    "ice": {
+      "windows": {
+        "0": [
+          {
+            "id": 1,
+            "role": "user",
+            "content": "x",
+            "ts": "2026-08-31T07:42:36.762Z"
+          }
+        ]
+      }
+    }
+  },
+  "groups": {
+    "g_test": [
+      {
+        "id": 30,
+        "role": "user",
+        "content": "群里",
+        "ts": "2026-08-31T07:42:36.763Z"
+      },
+      {
+        "id": 31,
+        "role": "assistant",
+        "content": "群回",
+        "ts": "2026-08-31T07:42:36.763Z"
+      }
+    ]
+  }
+}
