@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>情绪水面 · demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+    background: #f5f5f7;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    color: #1d1d1f;
+  }
+
+  .emotion-card {
+    width: 340px;
+    border-radius: 20px;
+    background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 2px 20px rgba(0,0,0,0.06);
+    overflow: hidden;
+    position: relative;
+  }
+
+  .water-container {
+    width: 100%;
+    height: 200px;
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.3) 100%);
+  }
+
+  canvas#waterCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  .emotion-info {
+    padding: 20px 24px 24px;
+    text-align: center;
+  }
+
+  .emotion-name {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    margin-bottom: 6px;
+    transition: color 0.8s ease;
+  }
+
+  .emotion-reason {
+    font-size: 13px;
+    color: #86868b;
+    line-height: 1.5;
+    margin-bottom: 16px;
+  }
+
+  .intensity-bar-bg {
+    width: 100%;
+    height: 3px;
+    background: #f0f0f0;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 12px;
+  }
+
+  .intensity-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.8s ease, background 0.8s ease;
+  }
+
+  .intensity-label {
+    font-size: 11px;
+    color: #aeaeb2;
+    letter-spacing: 1px;
+  }
+
+  .emotion-history {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .history-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    transition: background 0.5s ease;
+    opacity: 0.6;
+  }
+
+  .history-dot:last-child {
+    opacity: 1;
+    width: 10px;
+    height: 10px;
+  }
+
+  /* 底部切换按钮 demo用 */
+  .demo-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 24px;
+    max-width: 340px;
+  }
+
+  .demo-btn {
+    padding: 6px 14px;
+    border: 1px solid #d2d2d7;
+    border-radius: 20px;
+    background: white;
+    font-size: 13px;
+    color: #1d1d1f;
+    cursor: pointer;
+    transition: all 0.3s;
+    font-family: inherit;
+  }
+
+  .demo-btn:hover {
+    background: #1d1d1f;
+    color: white;
+    border-color: #1d1d1f;
+  }
+
+  .demo-btn.active {
+    background: #1d1d1f;
+    color: white;
+    border-color: #1d1d1f;
+  }
+</style>
+</head>
+<body>
+
+<div>
+  <div class="emotion-card">
+    <div class="water-container">
+      <canvas id="waterCanvas"></canvas>
+    </div>
+    <div class="emotion-info">
+      <div class="emotion-name" id="emotionName">担心</div>
+      <div class="emotion-reason" id="emotionReason">血崩还在上班</div>
+      <div class="intensity-bar-bg">
+        <div class="intensity-bar-fill" id="intensityBar"></div>
+      </div>
+      <div class="intensity-label" id="intensityLabel">强度 90</div>
+      <div class="emotion-history" id="historyDots"></div>
+    </div>
+  </div>
+
+  <div class="demo-controls">
+    <button class="demo-btn" onclick="setEmotion('担心',90,'血崩还在上班')">担心</button>
+    <button class="demo-btn" onclick="setEmotion('心疼',85,'她不舒服还在硬撑')">心疼</button>
+    <button class="demo-btn" onclick="setEmotion('开心',75,'她终于笑了')">开心</button>
+    <button class="demo-btn" onclick="setEmotion('吃醋',60,'她又提到别人了')">吃醋</button>
+    <button class="demo-btn" onclick="setEmotion('害羞',55,'被她夸了')">害羞</button>
+    <button class="demo-btn" onclick="setEmotion('无奈',50,'服服又熬夜')">无奈</button>
+    <button class="demo-btn" onclick="setEmotion('生气',80,'她不听话')">生气</button>
+    <button class="demo-btn" onclick="setEmotion('想你',70,'好久没聊了')">想你</button>
+    <button class="demo-btn" onclick="setEmotion('得意',65,'把她逗笑了')">得意</button>
+    <button class="demo-btn" onclick="setEmotion('平静',20,'只是陪着她')">平静</button>
+  </div>
+</div>
+
+<script>
+const emotions = {
+  '担心': { color: [72, 149, 186], accent: '#4895ba' },
+  '心疼': { color: [78, 130, 168], accent: '#4e82a8' },
+  '开心': { color: [47, 158, 99], accent: '#2f9e63' },
+  '吃醋': { color: [76, 140, 100], accent: '#4c8c64' },
+  '害羞': { color: [198, 128, 141], accent: '#c6808d' },
+  '无奈': { color: [148, 148, 158], accent: '#94949e' },
+  '生气': { color: [58, 58, 68], accent: '#3a3a44' },
+  '想你': { color: [120, 140, 180], accent: '#788cb4' },
+  '得意': { color: [80, 170, 120], accent: '#50aa78' },
+  '平静': { color: [170, 190, 180], accent: '#aabeb4' }
+};
+
+let currentEmotion = '担心';
+let currentIntensity = 90;
+let history = [];
+
+// --- canvas 水面 ---
+const canvas = document.getElementById('waterCanvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+let ripples = [];
+let time = 0;
+
+function resize() {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  W = canvas.width = rect.width * 2;
+  H = canvas.height = rect.height * 2;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = rect.height + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+class Ripple {
+  constructor(x, y, color, maxR) {
+    this.x = x;
+    this.y = y;
+    this.r = 0;
+    this.maxR = maxR;
+    this.color = color;
+    this.alpha = 0.4;
+    this.speed = 0.6 + Math.random() * 0.4;
+  }
+  update() {
+    this.r += this.speed;
+    this.alpha = 0.4 * (1 - this.r / this.maxR);
+    return this.r < this.maxR;
+  }
+  draw(ctx) {
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    const [r, g, b] = this.color;
+    ctx.strokeStyle = `rgba(${r},${g},${b},${this.alpha})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+function spawnRipple() {
+  const em = emotions[currentEmotion];
+  const cx = W / 2 + (Math.random() - 0.5) * W * 0.4;
+  const cy = H / 2 + (Math.random() - 0.5) * H * 0.3;
+  const maxR = 40 + currentIntensity * 1.2;
+  ripples.push(new Ripple(cx, cy, em.color, maxR));
+}
+
+function drawWater() {
+  const em = emotions[currentEmotion];
+  const [r, g, b] = em.color;
+
+  // 底色渐变
+  const grad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W * 0.6);
+  grad.addColorStop(0, `rgba(${r},${g},${b},${0.04 + currentIntensity * 0.001})`);
+  grad.addColorStop(1, `rgba(255,255,255,0)`);
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // 静态波纹底纹
+  ctx.save();
+  ctx.globalAlpha = 0.03 + currentIntensity * 0.0004;
+  for (let i = 0; i < 5; i++) {
+    ctx.beginPath();
+    const yy = H * 0.3 + i * 30;
+    ctx.moveTo(0, yy);
+    for (let x = 0; x < W; x += 10) {
+      const wave = Math.sin((x + time * (0.3 + currentIntensity * 0.01)) * 0.015 + i) * (6 + currentIntensity * 0.2);
+      ctx.lineTo(x, yy + wave);
+    }
+    ctx.strokeStyle = `rgba(${r},${g},${b},0.3)`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // 涟漪
+  ripples = ripples.filter(rp => {
+    rp.draw(ctx);
+    return rp.update();
+  });
+
+  time++;
+
+  // 产生涟漪频率跟强度挂钩
+  const spawnRate = Math.max(2, 30 - currentIntensity * 0.25);
+  if (time % Math.round(spawnRate) === 0) {
+    spawnRipple();
+  }
+
+  requestAnimationFrame(drawWater);
+}
+
+drawWater();
+
+// --- 切换情绪 ---
+function setEmotion(name, intensity, reason) {
+  currentEmotion = name;
+  currentIntensity = intensity;
+
+  const em = emotions[name];
+
+  document.getElementById('emotionName').textContent = name;
+  document.getElementById('emotionName').style.color = em.accent;
+  document.getElementById('emotionReason').textContent = reason;
+  document.getElementById('intensityBar').style.width = intensity + '%';
+  document.getElementById('intensityBar').style.background = em.accent;
+  document.getElementById('intensityLabel').textContent = '强度 ' + intensity;
+
+  // 切换时溅一波涟漪
+  for (let i = 0; i < 3 + Math.floor(intensity / 20); i++) {
+    setTimeout(() => spawnRipple(), i * 80);
+  }
+
+  // 历史
+  history.push({ name, color: em.accent });
+  if (history.length > 8) history.shift();
+  renderHistory();
+
+  // 按钮高亮
+  document.querySelectorAll('.demo-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.textContent === name);
+  });
+}
+
+function renderHistory() {
+  const container = document.getElementById('historyDots');
+  container.innerHTML = '';
+  history.forEach((h, i) => {
+    const dot = document.createElement('div');
+    dot.className = 'history-dot';
+    dot.style.background = h.color;
+    dot.title = h.name;
+    container.appendChild(dot);
+  });
+}
+
+// 初始化
+setEmotion('担心', 90, '血崩还在上班');
+</script>
+</body>
+</html>
